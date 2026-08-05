@@ -1,8 +1,12 @@
 #
 # install opencl kernel source files
 #
-FILE(GLOB DT_OPENCL_KERNELS "*.cl")
-FILE(GLOB DT_OPENCL_EXTRA "programs.conf" "common.h" "rgb_norms.h" "noise_generator.h" "color_conversion.h" "colorspace.h" "grain.h" "bilinear.h")
+# CONFIGURE_DEPENDS re-runs the glob on build, so a newly added kernel is
+# copied without a manual reconfigure. Without it a new .cl is silently
+# absent from the deployed tree and the module fails at runtime with
+# CL_INVALID_PROGRAM, then quietly falls back to CPU.
+FILE(GLOB DT_OPENCL_KERNELS CONFIGURE_DEPENDS "*.cl")
+FILE(GLOB DT_OPENCL_EXTRA CONFIGURE_DEPENDS "programs.conf" "common.h" "rgb_norms.h" "noise_generator.h" "color_conversion.h" "colorspace.h" "grain.h" "bilinear.h")
 
 set(DT_HDR_TRANSFER_HEADER "${CMAKE_SOURCE_DIR}/src/common/hdr-transfer.h")
 list(APPEND DT_OPENCL_EXTRA "${DT_HDR_TRANSFER_HEADER}")
