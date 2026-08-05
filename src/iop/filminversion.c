@@ -2016,7 +2016,7 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
 
 void init_global(dt_iop_module_so_t *self)
 {
-  const int program = 42; // filminversion.cl, from programs.conf
+  const int program = 44; // filminversion.cl, from programs.conf
   dt_iop_filminversion_global_data_t *gd = malloc(sizeof(dt_iop_filminversion_global_data_t));
   self->data = gd;
   gd->kernel_filminversion = dt_opencl_create_kernel(program, "filminversion");
