@@ -235,11 +235,13 @@ static void _filename_update_selection(_widgets_filename_t *filename)
   filename->internal_change--;
 }
 
-static void _filename_press(GtkGestureSingle *gesture, gint n_press, gdouble x, gdouble y, _widgets_filename_t *filename)
+// See _misc_press() in filters/misc.c for why this stays a plain "button-press-event"
+// signal handler rather than a GtkGestureMultiPress: GtkEntry's own built-in right-click
+// Cut/Copy/Paste popup is handled by its class default handler during that same signal,
+// and only a normally-connected handler returning TRUE runs early enough to pre-empt it.
+static gboolean _filename_press(GtkWidget *w, GdkEventButton *e, _widgets_filename_t *filename)
 {
-  GtkWidget *w = dt_gui_get_widget(gesture);
-
-  if(gtk_gesture_single_get_current_button(gesture) == GDK_BUTTON_SECONDARY)
+  if(e->button == GDK_BUTTON_SECONDARY)
   {
     _filename_tree_update_visibility(w, filename);
     gtk_popover_set_default_widget(GTK_POPOVER(filename->pop), w);
@@ -249,13 +251,14 @@ static void _filename_press(GtkGestureSingle *gesture, gint n_press, gdouble x, 
     _filename_update_selection(filename);
 
     gtk_widget_show_all(filename->pop);
+    return TRUE;
   }
-  else if(gtk_gesture_single_get_current_button(gesture) == GDK_BUTTON_PRIMARY
-          && n_press >= 2)
+  else if(e->button == GDK_BUTTON_PRIMARY && e->type == GDK_2BUTTON_PRESS)
   {
     gtk_entry_set_text(GTK_ENTRY(w), "");
     _filename_changed(w, filename);
   }
+  return FALSE;
 }
 
 static gboolean _filename_update(dt_lib_filtering_rule_t *rule)
@@ -372,9 +375,7 @@ static void _filename_widget_init(dt_lib_filtering_rule_t *rule, const dt_collec
   gtk_box_pack_start(GTK_BOX(hb), filename->name, TRUE, TRUE, 0);
   g_signal_connect(G_OBJECT(filename->name), "activate", G_CALLBACK(_filename_changed), filename);
   g_signal_connect(G_OBJECT(filename->name), "focus-out-event", G_CALLBACK(_filename_focus_out), filename);
-  GtkGestureSingle *g_name = dt_gui_connect_click(filename->name, _filename_press, NULL, filename);
-  gtk_gesture_single_set_button(g_name, GDK_BUTTON_SECONDARY);
-  gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(g_name), GTK_PHASE_TARGET);
+  g_signal_connect(G_OBJECT(filename->name), "button-press-event", G_CALLBACK(_filename_press), filename);
 
   filename->ext = dt_ui_entry_new(top ? 5 : 0);
   gtk_widget_set_can_default(filename->ext, TRUE);
@@ -386,9 +387,7 @@ static void _filename_widget_init(dt_lib_filtering_rule_t *rule, const dt_collec
   gtk_box_pack_start(GTK_BOX(hb), filename->ext, TRUE, TRUE, 0);
   g_signal_connect(G_OBJECT(filename->ext), "activate", G_CALLBACK(_filename_changed), filename);
   g_signal_connect(G_OBJECT(filename->ext), "focus-out-event", G_CALLBACK(_filename_focus_out), filename);
-  GtkGestureSingle *g_ext = dt_gui_connect_click(filename->ext, _filename_press, NULL, filename);
-  gtk_gesture_single_set_button(g_ext, GDK_BUTTON_SECONDARY);
-  gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(g_ext), GTK_PHASE_TARGET);
+  g_signal_connect(G_OBJECT(filename->ext), "button-press-event", G_CALLBACK(_filename_press), filename);
   if(top)
   {
     dt_gui_add_class(hb, "dt_quick_filter");

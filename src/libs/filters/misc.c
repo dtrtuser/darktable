@@ -20,7 +20,6 @@
   This file implements the necessary routines for all text baseed filters for the filtering module
 */
 
-#include "common/collection.h"
 typedef struct _widgets_misc_t
 {
   dt_lib_filtering_rule_t *rule;
@@ -114,10 +113,6 @@ void _misc_tree_update(_widgets_misc_t *misc)
     table = g_strdup("metering_mode");
     tooltip = g_strdup(_("no metering mode defined"));
   }
-  else if(misc->prop == DT_COLLECTION_PROP_DIMENSIONS)
-  {
-    tooltip = g_strdup(_("no image dimensions defined"));
-  }
 
   // SQL
   if(misc->prop == DT_COLLECTION_PROP_CAMERA)
@@ -157,18 +152,6 @@ void _misc_tree_update(_widgets_misc_t *misc)
                " GROUP BY group_id"
                " HAVING COUNT(*) > 1"
                " ORDER BY group_id",
-               d->last_where_ext);
-    // clang-format on
-  }
-  else if(misc->prop == DT_COLLECTION_PROP_DIMENSIONS)
-  {
-    // clang-format off
-    g_snprintf(query, sizeof(query),
-               "SELECT mi.width || 'x' || mi.height AS dim, COUNT(*) AS count"
-               " FROM main.images AS mi"
-               " WHERE %s"
-               " GROUP BY dim"
-               " ORDER BY dim",
                d->last_where_ext);
     // clang-format on
   }
@@ -278,16 +261,19 @@ static void _misc_update_selection(_widgets_misc_t *misc)
   misc->internal_change--;
 }
 
-static void _misc_press(GtkGestureSingle *gesture,
-                        gint n_press,
-                        gdouble x,
-                        gdouble y,
-                        _widgets_misc_t *misc)
+// A plain "button-press-event" signal handler (not a GtkGestureMultiPress) is used
+// here deliberately: GtkEntry has its own built-in right-click Cut/Copy/Paste popup,
+// handled by its class default handler during the same "button-press-event" signal.
+// A handler connected the normal way (not "_after") runs BEFORE that class default
+// handler and, by returning TRUE, stops the signal so the entry's own popup never
+// appears -- our camera/lens/etc. list takes its place instead. A GtkGestureMultiPress
+// (as used by dt_gui_connect_click()/_all()) is a separate bubble-phase controller that
+// runs after that signal has already been handled, so it never even sees the right-click.
+static gboolean _misc_press(GtkWidget *w,
+                            GdkEventButton *e,
+                            _widgets_misc_t *misc)
 {
-  GtkWidget *w = dt_gui_get_widget(gesture);
-  const guint button = gtk_gesture_single_get_current_button(gesture);
-
-  if(button == GDK_BUTTON_SECONDARY)
+  if(e->button == GDK_BUTTON_SECONDARY)
   {
     _misc_tree_update_visibility(w, misc);
     gtk_popover_set_default_widget(GTK_POPOVER(misc->pop), w);
@@ -297,13 +283,14 @@ static void _misc_press(GtkGestureSingle *gesture,
     _misc_update_selection(misc);
 
     gtk_widget_show_all(misc->pop);
+    return TRUE;
   }
-  else if(button == GDK_BUTTON_PRIMARY
-          && n_press >= 2)
+  else if(e->button == GDK_BUTTON_PRIMARY && e->type == GDK_2BUTTON_PRESS)
   {
     gtk_entry_set_text(GTK_ENTRY(misc->name), "");
     _misc_changed(w, misc);
   }
+  return FALSE;
 }
 
 static gboolean _misc_update(dt_lib_filtering_rule_t *rule)
@@ -470,17 +457,6 @@ static void _misc_widget_init(dt_lib_filtering_rule_t *rule,
                          "multiple values can be separated by ','\n"
                          "\nright-click to get existing group ids"));
   }
-  else if(prop == DT_COLLECTION_PROP_DIMENSIONS)
-  {
-    name = g_strdup(_("image dimensions"));
-    tooltip = g_strdup(_("enter the image dimensions to search.\n"
-                         "use the format widthxheight, i.e.\n"
-                         "'6000x4000' for a full match,\n"
-                         "'6000x' for width only,\n"
-                         "'x4000' for height only.\n"
-                         "multiple values can be separated by ','\n"
-                         "\nright-click to get existing image dimensions"));
-  }
 
   gtk_entry_set_placeholder_text(GTK_ENTRY(misc->name), name);
   gtk_widget_set_tooltip_text(misc->name, tooltip);
@@ -491,9 +467,7 @@ static void _misc_widget_init(dt_lib_filtering_rule_t *rule,
   gtk_box_pack_start(GTK_BOX(hb), misc->name, TRUE, TRUE, 0);
   g_signal_connect(G_OBJECT(misc->name), "activate", G_CALLBACK(_misc_changed), misc);
   g_signal_connect(G_OBJECT(misc->name), "focus-out-event", G_CALLBACK(_misc_focus_out), misc);
-  GtkGestureSingle *misc_gesture = dt_gui_connect_click(misc->name, _misc_press, NULL, misc);
-  gtk_gesture_single_set_button(misc_gesture, GDK_BUTTON_SECONDARY);
-  gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(misc_gesture), GTK_PHASE_TARGET);
+  g_signal_connect(G_OBJECT(misc->name), "button-press-event", G_CALLBACK(_misc_press), misc);
 
   if(top)
   {

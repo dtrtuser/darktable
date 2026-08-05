@@ -355,7 +355,7 @@ static void _colors_widget_init(dt_lib_filtering_rule_t *rule, const dt_collecti
     dt_gui_add_class(colors->colors[k], "dt_dimmed");
     g_object_set_data(G_OBJECT(colors->colors[k]), "colors_self", colors);
     gtk_box_pack_start(GTK_BOX(hbox), colors->colors[k], FALSE, FALSE, 0);
-    dt_gui_connect_click(colors->colors[k], _colors_clicked_gesture, NULL, colors);
+    dt_gui_connect_click_all(colors->colors[k], _colors_clicked_gesture, NULL, colors);
     dt_gui_connect_motion(colors->colors[k], NULL, _colors_enter_cb, NULL, GINT_TO_POINTER(k));
   }
   colors->operator = dtgtk_button_new_full(dtgtk_cairo_paint_intersection, 0, NULL,
