@@ -91,6 +91,7 @@ const dt_iop_order_entry_t legacy_order[] = {
   { { 9.0f }, "mask_manager", 0},
   { {10.0f }, "denoiseprofile", 0},
   { {11.0f }, "tonemap", 0},
+  { {11.9f }, "filminversion", 0},
   { {12.0f }, "exposure", 0},
   { {13.0f }, "spots", 0},
   { {14.0f }, "retouch", 0},
@@ -206,6 +207,7 @@ const dt_iop_order_entry_t v30_order[] = {
   { {18.0f }, "liquify", 0},
   { {19.0f }, "spots", 0},
   { {20.0f }, "retouch", 0},
+  { {20.9f }, "filminversion", 0},   // scene-referred film inversion, right before exposure
   { {21.0f }, "exposure", 0},
   { {22.0f }, "mask_manager", 0},
   { {23.0f }, "tonemap", 0},
@@ -326,6 +328,7 @@ const dt_iop_order_entry_t v50_order[] = {
   { {18.0f }, "liquify", 0},
   { {19.0f }, "spots", 0},
   { {20.0f }, "retouch", 0},
+  { {20.9f }, "filminversion", 0},   // scene-referred film inversion, right before exposure
   { {21.0f }, "exposure", 0},
   { {22.0f }, "mask_manager", 0},
   { {23.0f }, "tonemap", 0},
@@ -448,6 +451,7 @@ const dt_iop_order_entry_t v30_jpg_order[] = {
   { { 28.0f }, "liquify", 0},
   { { 28.0f }, "spots", 0},
   { { 28.0f }, "retouch", 0},
+  { { 28.0f }, "filminversion", 0 }, // scene-referred film inversion, right before exposure
   { { 28.0f }, "exposure", 0},
   { { 28.0f }, "mask_manager", 0},
   { { 28.0f }, "tonemap", 0},
@@ -571,6 +575,7 @@ const dt_iop_order_entry_t v50_jpg_order[] = {
   { { 28.0f }, "liquify", 0},
   { { 28.0f }, "spots", 0},
   { { 28.0f }, "retouch", 0},
+  { { 28.0f }, "filminversion", 0 }, // scene-referred film inversion, right before exposure
   { { 28.0f }, "exposure", 0},
   { { 28.0f }, "mask_manager", 0},
   { { 28.0f }, "tonemap", 0},
@@ -728,6 +733,7 @@ void dt_ioppr_migrate_legacy_iop_order_list(GList *iop_order_list)
   //                The insertion can be done depending on the current
   //                iop-order list kind.
   _insert_before(iop_order_list, "nlmeans", "negadoctor");
+  _insert_before(iop_order_list, "exposure", "filminversion");
   _insert_before(iop_order_list, "negadoctor", "channelmixerrgb");
   _insert_before(iop_order_list, "negadoctor", "contrastntexture");  
   _insert_before(iop_order_list, "negadoctor", "censorize");
