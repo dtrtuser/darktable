@@ -3116,8 +3116,8 @@ static gboolean _draw_retrieve_lines_from_params(dt_iop_module_t *self,
       g->horizontal_count = 2;
       g->vertical_weight = 2.0;
       g->horizontal_weight = 2.0;
-      g->lines_in_width = piece->iwidth;
-      g->lines_in_height = piece->iheight;
+      g->lines_in_width = piece->buf_in.width;
+      g->lines_in_height = piece->buf_in.height;
       g->current_structure_method = method;
       return TRUE;
     }
@@ -3161,8 +3161,8 @@ static gboolean _draw_retrieve_lines_from_params(dt_iop_module_t *self,
       g->horizontal_count = hnb;
       g->vertical_weight = (float)vnb;
       g->horizontal_weight = (float)hnb;
-      g->lines_in_width = piece->iwidth;
-      g->lines_in_height = piece->iheight;
+      g->lines_in_width = piece->buf_in.width;
+      g->lines_in_height = piece->buf_in.height;
       g->current_structure_method = method;
       return TRUE;
     }
@@ -3284,8 +3284,8 @@ static void _do_get_structure_lines(dt_iop_module_t *self)
 
   g->current_structure_method = ASHIFT_METHOD_LINES;
 
-  g->lines_in_width = piece->iwidth;
-  g->lines_in_height = piece->iheight;
+  g->lines_in_width = piece->buf_in.width;
+  g->lines_in_height = piece->buf_in.height;
   g->lines_x_off = 0;
   g->lines_y_off = 0;
 
@@ -3368,8 +3368,8 @@ static void _do_get_structure_quad(dt_iop_module_t *self)
       // get real line type (they may be wrong due to image rotation)
       for(int i = 0; i < 4; i++) _draw_retrieve_line_type(&g->lines[i]);
 
-      g->lines_in_width = piece->iwidth;
-      g->lines_in_height = piece->iheight;
+      g->lines_in_width = piece->buf_in.width;
+      g->lines_in_height = piece->buf_in.height;
       g->lines_x_off = 0;
       g->lines_y_off = 0;
       g->vertical_count = 2;
