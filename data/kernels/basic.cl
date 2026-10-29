@@ -3068,6 +3068,74 @@ kernel void md_lens_correction(read_only image2d_t in,
 }
 #undef MAXKNOTS
 
+/* kernel for the manual distortion plugin */
+// keep in sync with defines in interpolation, as in interpolation_compute_single()
+#define MAX_HALF_FILTER_WIDTH 3
+#define MAX_KERNEL_REQ ((2 * (MAX_HALF_FILTER_WIDTH) + 3) & (~3))
+
+kernel void manual_distortion(read_only image2d_t in,
+                              write_only image2d_t out,
+                              const int owidth,
+                              const int oheight,
+                              const int iwidth,
+                              const int iheight,
+                              const float orig_w,
+                              const float orig_h,
+                              const float w2,
+                              const float h2,
+                              const float tr,
+                              const float t,
+                              const float k1,
+                              const float k2,
+                              const float k3,
+                              const int roix,
+                              const int roiy,
+                              const int roox,
+                              const int rooy,
+                              const int itor_mode,
+                              const int itor_width)
+{
+  const int x = get_global_id(0);
+  const int y = get_global_id(1);
+  if(x >= owidth || y >= oheight) return;
+
+  const float cx = (float)(roox + x) - w2;
+  const float cy = (float)(rooy + y) - h2;
+  const float x2 = tr * tr * (cx * cx + cy * cy);
+  const float m = t * (1.0f + x2 * (k1 + x2 * (k2 + x2 * k3)));
+  const float xs = w2 + m * cx;
+  const float ys = h2 + m * cy;
+
+  float4 pixel = (float4)0.0f;
+  if(xs >= -0.5f && ys >= -0.5f && xs <= orig_w - 0.5f && ys <= orig_h - 0.5f)
+  {
+    const float xi = clamp(xs - roix, 0.0f, (float)iwidth - 1.0f);
+    const float yi = clamp(ys - roiy, 0.0f, (float)iheight - 1.0f);
+
+    float kernelh[MAX_KERNEL_REQ];
+    float kernelv[MAX_KERNEL_REQ];
+    const float normh = compute_upsampling_taps(itor_mode, itor_width, kernelh, xi);
+    const float normv = compute_upsampling_taps(itor_mode, itor_width, kernelv, yi);
+
+    const int ix = (int)xi - itor_width + 1;
+    const int iy = (int)yi - itor_width + 1;
+
+    for(int i = 0; i < 2 * itor_width; i++)
+    {
+      float4 h = (float4)0.0f;
+      for(int j = 0; j < 2 * itor_width; j++)
+        h += kernelh[j] * Areadpixel(in, clip_mirror(ix + j, iwidth - 1), clip_mirror(iy + i, iheight - 1));
+      pixel += kernelv[i] * h;
+    }
+    pixel /= normh * normv;
+  }
+
+  write_ipixel(out, (int2)(x, y), pixel);
+}
+
+#undef MAX_KERNEL_REQ
+#undef MAX_HALF_FILTER_WIDTH
+
 
 /* kernel for flip */
 __kernel void
