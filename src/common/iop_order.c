@@ -97,6 +97,7 @@ const dt_iop_order_entry_t legacy_order[] = {
   { {13.0f }, "spots", 0},
   { {14.0f }, "retouch", 0},
   { {15.0f }, "lens", 0},
+  { {15.2f }, "distortion", 0},
   { {15.5f }, "cacorrectrgb", 0},
   { {16.0f }, "ashift", 0},
   { {17.0f }, "liquify", 0},
@@ -197,6 +198,7 @@ const dt_iop_order_entry_t v30_order[] = {
   { {11.0f }, "rotatepixels", 0},
   { {12.0f }, "scalepixels", 0},
   { {13.0f }, "lens", 0},
+  { {13.2f }, "distortion", 0},
   { {13.5f }, "cacorrectrgb", 0}, // correct chromatic aberrations
                                   // after lens correction so that
                                   // lensfun does not reintroduce
@@ -321,6 +323,7 @@ const dt_iop_order_entry_t v50_order[] = {
   { {11.0f }, "rotatepixels", 0},
   { {12.0f }, "scalepixels", 0},
   { {13.0f }, "lens", 0},
+  { {13.2f }, "distortion", 0},
   { {13.5f }, "cacorrectrgb", 0}, // correct chromatic aberrations
                                   // after lens correction so that
                                   // lensfun does not reintroduce
@@ -450,6 +453,7 @@ const dt_iop_order_entry_t v30_jpg_order[] = {
   { { 28.0f }, "rotatepixels", 0},
   { { 28.0f }, "scalepixels", 0},
   { { 28.0f }, "lens", 0},
+  { { 28.0f }, "distortion", 0},
   { { 28.0f }, "cacorrectrgb", 0}, // correct chromatic aberrations after lens correction so that lensfun
                                   // does not reintroduce chromatic aberrations when trying to correct them
   { { 28.0f }, "hazeremoval", 0},
@@ -577,6 +581,7 @@ const dt_iop_order_entry_t v50_jpg_order[] = {
   { { 28.0f }, "rotatepixels", 0},
   { { 28.0f }, "scalepixels", 0},
   { { 28.0f }, "lens", 0},
+  { { 28.0f }, "distortion", 0},
   { { 28.0f }, "cacorrectrgb", 0}, // correct chromatic aberrations after lens correction so that lensfun
                                   // does not reintroduce chromatic aberrations when trying to correct them
   { { 28.0f }, "hazeremoval", 0},
@@ -773,6 +778,7 @@ void dt_ioppr_migrate_legacy_iop_order_list(GList *iop_order_list)
   _insert_before_after(iop_order_list, "highlights", "rasterfile", TRUE);
   _insert_before_after(iop_order_list, "demosaic", "demosaicscale", FALSE);
   _insert_before_after(iop_order_list, "colorbalance", "colorharmonizer", TRUE);
+  _insert_before_after(iop_order_list, "lens", "distortion", FALSE);
 }
 
 static dt_iop_order_t _ioppr_get_default_iop_order_version(const dt_imgid_t imgid)
