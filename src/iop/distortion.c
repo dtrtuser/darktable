@@ -61,6 +61,15 @@ typedef struct dt_iop_distortion_data_t
   gboolean autoscale;
 } dt_iop_distortion_data_t;
 
+// must be allocated even though nothing reads it: dt_iop_gui_update()
+// only refreshes the _from_params widgets of a module with gui_data
+// (src/develop/imageop.c), so without it reset and history changes
+// leave the slider and toggle showing stale values
+typedef struct dt_iop_distortion_gui_data_t
+{
+  GtkWidget *distortion, *autoscale;
+} dt_iop_distortion_gui_data_t;
+
 typedef struct dt_iop_distortion_global_data_t
 {
   int kernel_manual_distortion;
@@ -509,14 +518,18 @@ void cleanup_global(dt_iop_module_so_t *self)
 
 void gui_init(dt_iop_module_t *self)
 {
-  GtkWidget *w = dt_bauhaus_slider_from_params(self, "distortion");
-  gtk_widget_set_tooltip_text(w, _("positive values correct barrel distortion, where straight lines\n"
-                                   "bow outward; negative values correct pincushion distortion,\n"
-                                   "where they bow inward"));
+  dt_iop_distortion_gui_data_t *g = IOP_GUI_ALLOC(distortion);
 
-  w = dt_bauhaus_toggle_from_params(self, "autoscale");
-  gtk_widget_set_tooltip_text(w, _("scale the corrected image to fill the frame, so that no empty\n"
-                                   "areas show and as little of the image as possible is lost"));
+  g->distortion = dt_bauhaus_slider_from_params(self, "distortion");
+  gtk_widget_set_tooltip_text(g->distortion,
+                              _("positive values correct barrel distortion, where straight lines\n"
+                                "bow outward; negative values correct pincushion distortion,\n"
+                                "where they bow inward"));
+
+  g->autoscale = dt_bauhaus_toggle_from_params(self, "autoscale");
+  gtk_widget_set_tooltip_text(g->autoscale,
+                              _("scale the corrected image to fill the frame, so that no empty\n"
+                                "areas show and as little of the image as possible is lost"));
 }
 
 // clang-format off
