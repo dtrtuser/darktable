@@ -79,8 +79,11 @@ typedef struct dt_iop_distortion_params_t
 #define DT_DISTORTION_CA_MAX 0.005f
 
 // the measurement runs on at most this many pixels along the long edge,
-// so that a full size export measures at about the preview pipe's scale
+// so that a full size export measures at about the darkroom's scale
 #define DT_DISTORTION_CA_SIZE 2000
+
+// and on at least this many, below which the shifts are too small to see
+#define DT_DISTORTION_CA_MIN_SIZE 800
 
 typedef struct dt_iop_distortion_data_t
 {
@@ -93,7 +96,7 @@ typedef struct dt_iop_distortion_data_t
 
 // the gui data is needed for dt_iop_gui_update() to refresh the
 // _from_params widgets (src/develop/imageop.c), and it carries the
-// measurement from the preview pipe to the history
+// measurement from the darkroom's main pipe to the history
 typedef struct dt_iop_distortion_gui_data_t
 {
   GtkWidget *distortion, *autoscale, *ca_correct;
@@ -209,7 +212,7 @@ static inline float _bilinear(const float *const in,
 // pointing away from the center (cx, cy). both channels are
 // standardized over the tile, so a gain or offset between them does not
 // matter, and Gauss-Newton refines d from 0. returns FALSE when the
-// tile has no edge that tells
+// tile has no edge that tells, or has clipped pixels, flagged in alpha
 static gboolean _tile_shift(const float *const buf,
                             const int width,
                             const int height,
@@ -228,9 +231,12 @@ static gboolean _tile_shift(const float *const buf,
   for(int j = y0; j < y0 + size; j++)
     for(int i = x0; i < x0 + size; i++)
     {
-      const double g = buf[4 * ((size_t)j * width + i) + 1];
-      sg += g;
-      sgg += g * g;
+      const float *const p = buf + 4 * ((size_t)j * width + i);
+      // the channels clip at different places along a blown edge, which
+      // looks like a shift
+      if(p[3] > 0.0f) return FALSE;
+      sg += p[1];
+      sgg += (double)p[1] * p[1];
     }
   const double mg = sg / n;
   const double sdg = sqrt(MAX(sgg / n - mg * mg, 0.0));
@@ -352,13 +358,15 @@ static gboolean _fit_shift(const float *const r,
 
 // measures the lateral CA of in, which covers roi_in of an image
 // centered at (w2, h2), as the a and b of s(r) for red then blue, in the
-// channels of the transposed matrix to_in_t times the pixels. leaves
-// zeros, i.e. no correction, when the image does not have enough edges
+// channels of the transposed matrix to_in_t times the pixels, which clip
+// at clip. leaves zeros, i.e. no correction, when the image does not
+// have enough edges
 static void _measure_ca(const float *const in,
                         const dt_iop_roi_t *const roi_in,
                         const float w2,
                         const float h2,
                         const dt_colormatrix_t to_in_t,
+                        const dt_aligned_pixel_t clip,
                         float ca[4])
 {
   for(int k = 0; k < 4; k++) ca[k] = 0.0f;
@@ -370,6 +378,7 @@ static void _measure_ca(const float *const in,
   const int height = roi_in->height / f;
   if(width < 128 || height < 128) return;
 
+  // alpha flags the pixels with a clipped source pixel
   float *const src = dt_alloc_align_float((size_t)4 * width * height);
   if(!src) return;
   const float norm = 1.0f / (f * f);
@@ -378,13 +387,22 @@ static void _measure_ca(const float *const in,
     for(int i = 0; i < width; i++)
     {
       dt_aligned_pixel_t sum = { 0.0f };
+      float clipped = 0.0f;
       for(int v = 0; v < f; v++)
         for(int u = 0; u < f; u++)
         {
-          const float *const p = in + 4 * ((size_t)(f * j + v) * roi_in->width + f * i + u);
-          for_each_channel(c) sum[c] += norm * p[c];
+          dt_aligned_pixel_t q;
+          dt_apply_transposed_color_matrix(in + 4 * ((size_t)(f * j + v) * roi_in->width + f * i + u),
+                                           to_in_t, q);
+          for_three_channels(c)
+          {
+            sum[c] += norm * q[c];
+            if(q[c] >= clip[c]) clipped = 1.0f;
+          }
         }
-      dt_apply_transposed_color_matrix(sum, to_in_t, src + 4 * ((size_t)j * width + i));
+      float *const o = src + 4 * ((size_t)j * width + i);
+      for_three_channels(c) o[c] = sum[c];
+      o[3] = clipped;
     }
 
   const float cx = (w2 - roi_in->x - 0.5f * (f - 1)) / f;
@@ -443,14 +461,28 @@ static void _measure_ca(const float *const in,
   dt_free_align(src);
 }
 
-// keeps the measurement for the history when it was made by the preview
-// pipe, which sees the whole image at any zoom
+// can this run measure the CA? it needs the whole image, at a size that
+// resolves the shifts. the preview pipe does not qualify: it demosaics a
+// shrunk mosaic, whose channels are misregistered enough to swamp the CA
+static gboolean _ca_can_measure(const dt_dev_pixelpipe_iop_t *piece,
+                                const dt_iop_roi_t *const roi_in,
+                                const dt_iop_roi_t *const roi_out)
+{
+  return !dt_pipe_is_preview(piece->pipe)
+         && roi_out->x == 0 && roi_out->y == 0
+         && roi_out->width >= floorf(roi_out->scale * piece->buf_out.width) - 2
+         && roi_out->height >= floorf(roi_out->scale * piece->buf_out.height) - 2
+         && MAX(roi_in->width, roi_in->height) >= DT_DISTORTION_CA_MIN_SIZE;
+}
+
+// keeps the measurement for the history when it was made by the
+// darkroom's main pipe
 static void _ca_measured(dt_iop_module_t *self,
                          dt_dev_pixelpipe_iop_t *piece,
                          const float ca[4])
 {
   dt_iop_distortion_gui_data_t *g = self->gui_data;
-  if(!g || !dt_pipe_is_preview(piece->pipe)) return;
+  if(!g || !dt_pipe_is_full(piece->pipe)) return;
 
   dt_iop_gui_enter_critical_section(self);
   for(int k = 0; k < 4; k++) g->ca[k] = ca[k];
@@ -463,18 +495,19 @@ static void _ca_measured(dt_iop_module_t *self,
 // reach this module before colorin, in camera RGB, but other files come
 // in the work profile, whose red and blue mix in some green. to_in_t and
 // to_work_t, transposed, convert to and from the input profile's linear
-// RGB, or are the identity when that is not needed or not possible
-static void _ca_space(const dt_iop_module_t *self,
-                      const dt_dev_pixelpipe_iop_t *piece,
-                      dt_colormatrix_t to_in_t,
-                      dt_colormatrix_t to_work_t)
+// RGB, or are the identity when that is not needed or not possible.
+// returns whether they convert
+static gboolean _ca_space(const dt_iop_module_t *self,
+                          const dt_dev_pixelpipe_iop_t *piece,
+                          dt_colormatrix_t to_in_t,
+                          dt_colormatrix_t to_work_t)
 {
   for(int i = 0; i < 4; i++)
     for(int j = 0; j < 4; j++)
       to_in_t[i][j] = to_work_t[i][j] = (i == j && i < 3) ? 1.0f : 0.0f;
 
   if(self->iop_order < dt_ioppr_get_iop_order(self->dev->iop_order_list, "colorin", 0))
-    return;
+    return FALSE;
 
   const dt_iop_order_iccprofile_info_t *const work
       = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
@@ -485,7 +518,7 @@ static void _ca_space(const dt_iop_module_t *self,
      || !dt_is_valid_colormatrix(work->matrix_out[0][0])
      || !dt_is_valid_colormatrix(input->matrix_in[0][0])
      || !dt_is_valid_colormatrix(input->matrix_out[0][0]))
-    return;
+    return FALSE;
 
   dt_colormatrix_t to_in = { { 0.0f } };
   dt_colormatrix_t to_work = { { 0.0f } };
@@ -493,6 +526,18 @@ static void _ca_space(const dt_iop_module_t *self,
   dt_colormatrix_mul(to_work, work->matrix_out, input->matrix_in);
   dt_colormatrix_transpose(to_in_t, to_in);
   dt_colormatrix_transpose(to_work_t, to_work);
+  return TRUE;
+}
+
+// where the channels _measure_ca() sees clip, with a margin: the input
+// profile's linear RGB clips at 1, the camera RGB of a raw at its white
+// level times the white balance and exposure
+static void _ca_clip(const dt_dev_pixelpipe_iop_t *piece,
+                     const gboolean converted,
+                     dt_aligned_pixel_t clip)
+{
+  for_three_channels(c)
+    clip[c] = 0.95f * (converted ? 1.0f : piece->dsc_in.processed_maximum[c]);
 }
 
 // s(r) for red and blue at normalized input radius r = sqrt(r2)
@@ -800,13 +845,18 @@ void process(dt_iop_module_t *self,
   const float limw = roi_in->width - 1;
   const float limh = roi_in->height - 1;
 
-  const gboolean ca_on = d->ca_correct;
   float ca[4] = { 0.0f };
   dt_colormatrix_t to_in_t, to_work_t;
-  _ca_space(self, piece, to_in_t, to_work_t);
-  if(d->ca_measure)
+  const gboolean converted = _ca_space(self, piece, to_in_t, to_work_t);
+  const gboolean measure = d->ca_measure && _ca_can_measure(piece, roi_in, roi_out);
+  // coefficients that are unknown and cannot be measured here mean no
+  // correction for now, rather than a poor one
+  const gboolean ca_on = d->ca_correct && (measure || !d->ca_measure);
+  if(measure)
   {
-    _measure_ca(in, roi_in, w2, h2, to_in_t, ca);
+    dt_aligned_pixel_t clip;
+    _ca_clip(piece, converted, clip);
+    _measure_ca(in, roi_in, w2, h2, to_in_t, clip, ca);
     _ca_measured(self, piece, ca);
   }
   else if(ca_on)
@@ -866,7 +916,7 @@ void process(dt_iop_module_t *self,
         const dt_aligned_pixel_t mixed = { ir[0], ig[1], ib[2], 0.0f };
         dt_aligned_pixel_t res;
         dt_apply_transposed_color_matrix(mixed, to_work_t, res);
-        for_each_channel(c) o[c] = res[c];
+        for_three_channels(c) o[c] = res[c];
       }
     }
   }
@@ -891,11 +941,12 @@ int process_cl(dt_iop_module_t *self,
   const float tr = t / dt_fast_hypotf(w2, h2);
 
   const int devid = piece->pipe->devid;
-  const int ca_on = d->ca_correct;
   float ca[4] = { 0.0f };
   dt_colormatrix_t to_in_t, to_work_t;
-  _ca_space(self, piece, to_in_t, to_work_t);
-  if(d->ca_measure)
+  const gboolean converted = _ca_space(self, piece, to_in_t, to_work_t);
+  const gboolean measure = d->ca_measure && _ca_can_measure(piece, roi_in, roi_out);
+  const int ca_on = d->ca_correct && (measure || !d->ca_measure);
+  if(measure)
   {
     float *host = dt_alloc_align_float((size_t)4 * roi_in->width * roi_in->height);
     if(!host) return DT_OPENCL_SYSMEM_ALLOCATION;
@@ -904,7 +955,9 @@ int process_cl(dt_iop_module_t *self,
                                                     4 * sizeof(float));
     if(err == CL_SUCCESS)
     {
-      _measure_ca(host, roi_in, w2, h2, to_in_t, ca);
+      dt_aligned_pixel_t clip;
+      _ca_clip(piece, converted, clip);
+      _measure_ca(host, roi_in, w2, h2, to_in_t, clip, ca);
       _ca_measured(self, piece, ca);
     }
     dt_free_align(host);
@@ -1023,8 +1076,8 @@ void cleanup_global(dt_iop_module_so_t *self)
   self->data = NULL;
 }
 
-// stores a measurement of the preview pipe in the history, once
-static void _preview_pipe_finished(gpointer instance, dt_iop_module_t *self)
+// stores a measurement of the darkroom's main pipe in the history, once
+static void _ui_pipe_finished(gpointer instance, dt_iop_module_t *self)
 {
   dt_iop_distortion_gui_data_t *g = self->gui_data;
   dt_iop_distortion_params_t *p = self->params;
@@ -1076,10 +1129,10 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->ca_correct,
                               _("automatically correct lateral chromatic aberration, the color\n"
                                 "fringes along edges that grow toward the corners. it is measured\n"
-                                "from the image when turned on; turn it off and on again to\n"
-                                "measure it anew"));
+                                "from the whole image when turned on, so the image must be fully in\n"
+                                "view; turn it off and on again to measure it anew"));
 
-  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED, _preview_pipe_finished);
+  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED, _ui_pipe_finished);
 }
 
 // clang-format off
