@@ -1041,6 +1041,12 @@ void commit_params(dt_iop_module_t *self,
                       && (d->ca[0] != 0.0f || d->ca[1] != 0.0f
                           || d->ca[2] != 0.0f || d->ca[3] != 0.0f));
 
+  // measuring is a side effect of process(), which the pipe skips when it
+  // has cached output for the same params, as after turning the
+  // correction off and on again
+  if(d->ca_measure)
+    dt_dev_pixelpipe_cache_invalidate_later(pipe, self->iop_order, "distortion measures CA: ");
+
   if(d->k1 == 0.0f && d->k2 == 0.0f && d->k3 == 0.0f && !d->ca_correct)
     piece->enabled = FALSE;
 }
