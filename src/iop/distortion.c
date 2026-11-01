@@ -113,17 +113,18 @@ typedef struct dt_iop_distortion_global_data_t
 
 const char *name()
 {
-  return C_("modulename", "manual distortion");
+  return C_("modulename", "manual lens corrections");
 }
 
 const char *aliases()
 {
-  return _("barrel|pincushion|lens distortion");
+  return _("barrel|pincushion|lens distortion|manual distortion|lateral chromatic aberration");
 }
 
 const char **description(dt_iop_module_t *self)
 {
-  return dt_iop_set_description(self, _("manually correct barrel and pincushion lens distortion"),
+  return dt_iop_set_description(self, _("manually correct barrel and pincushion lens distortion,\n"
+                                        "and automatically correct lateral chromatic aberration"),
                                       _("corrective"),
                                       _("linear, RGB, scene-referred"),
                                       _("geometric, RGB"),
