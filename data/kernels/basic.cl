@@ -3404,6 +3404,37 @@ kernel void md_lens_correction(read_only image2d_t in,
 #define MAX_HALF_FILTER_WIDTH 3
 #define MAX_KERNEL_REQ ((2 * (MAX_HALF_FILTER_WIDTH) + 3) & (~3))
 
+// one interpolated pixel at (xi, yi) in roi coordinates, clamped to the roi
+static float4 _manual_distortion_sample(read_only image2d_t in,
+                                        const int iwidth,
+                                        const int iheight,
+                                        float xi,
+                                        float yi,
+                                        const int itor_mode,
+                                        const int itor_width)
+{
+  xi = clamp(xi, 0.0f, (float)iwidth - 1.0f);
+  yi = clamp(yi, 0.0f, (float)iheight - 1.0f);
+
+  float kernelh[MAX_KERNEL_REQ];
+  float kernelv[MAX_KERNEL_REQ];
+  const float normh = compute_upsampling_taps(itor_mode, itor_width, kernelh, xi);
+  const float normv = compute_upsampling_taps(itor_mode, itor_width, kernelv, yi);
+
+  const int ix = (int)xi - itor_width + 1;
+  const int iy = (int)yi - itor_width + 1;
+
+  float4 pixel = (float4)0.0f;
+  for(int i = 0; i < 2 * itor_width; i++)
+  {
+    float4 h = (float4)0.0f;
+    for(int j = 0; j < 2 * itor_width; j++)
+      h += kernelh[j] * Areadpixel(in, clip_mirror(ix + j, iwidth - 1), clip_mirror(iy + i, iheight - 1));
+    pixel += kernelv[i] * h;
+  }
+  return pixel / (normh * normv);
+}
+
 kernel void manual_distortion(read_only image2d_t in,
                               write_only image2d_t out,
                               const int owidth,
@@ -3424,7 +3455,14 @@ kernel void manual_distortion(read_only image2d_t in,
                               const int roox,
                               const int rooy,
                               const int itor_mode,
-                              const int itor_width)
+                              const int itor_width,
+                              const int ca_on,
+                              const float inv_r2,
+                              const float ca_ra,
+                              const float ca_rb,
+                              const float ca_ba,
+                              const float ca_bb,
+                              constant const float *const matrices)
 {
   const int x = get_global_id(0);
   const int y = get_global_id(1);
@@ -3440,25 +3478,28 @@ kernel void manual_distortion(read_only image2d_t in,
   float4 pixel = (float4)0.0f;
   if(xs >= -0.5f && ys >= -0.5f && xs <= orig_w - 0.5f && ys <= orig_h - 0.5f)
   {
-    const float xi = clamp(xs - roix, 0.0f, (float)iwidth - 1.0f);
-    const float yi = clamp(ys - roiy, 0.0f, (float)iheight - 1.0f);
+    pixel = _manual_distortion_sample(in, iwidth, iheight, xs - roix, ys - roiy, itor_mode, itor_width);
 
-    float kernelh[MAX_KERNEL_REQ];
-    float kernelv[MAX_KERNEL_REQ];
-    const float normh = compute_upsampling_taps(itor_mode, itor_width, kernelh, xi);
-    const float normv = compute_upsampling_taps(itor_mode, itor_width, kernelv, yi);
-
-    const int ix = (int)xi - itor_width + 1;
-    const int iy = (int)yi - itor_width + 1;
-
-    for(int i = 0; i < 2 * itor_width; i++)
+    if(ca_on)
     {
-      float4 h = (float4)0.0f;
-      for(int j = 0; j < 2 * itor_width; j++)
-        h += kernelh[j] * Areadpixel(in, clip_mirror(ix + j, iwidth - 1), clip_mirror(iy + i, iheight - 1));
-      pixel += kernelv[i] * h;
+      // red and blue of the input profile sample at their own scale of
+      // the green position, clamped like in process()
+      const float r2 = m * m * (cx * cx + cy * cy) * inv_r2;
+      const float sr = 1.0f + ca_ra + ca_rb * r2;
+      const float sb = 1.0f + ca_ba + ca_bb * r2;
+      const float4 pr = _manual_distortion_sample(in, iwidth, iheight, w2 + sr * m * cx - roix,
+                                                  h2 + sr * m * cy - roiy, itor_mode, itor_width);
+      const float4 pb = _manual_distortion_sample(in, iwidth, iheight, w2 + sb * m * cx - roix,
+                                                  h2 + sb * m * cy - roiy, itor_mode, itor_width);
+      constant const float *const ti = matrices;
+      constant const float *const tw = matrices + 9;
+      const float ir = ti[0] * pr.x + ti[1] * pr.y + ti[2] * pr.z;
+      const float ig = ti[3] * pixel.x + ti[4] * pixel.y + ti[5] * pixel.z;
+      const float ib = ti[6] * pb.x + ti[7] * pb.y + ti[8] * pb.z;
+      pixel.x = tw[0] * ir + tw[1] * ig + tw[2] * ib;
+      pixel.y = tw[3] * ir + tw[4] * ig + tw[5] * ib;
+      pixel.z = tw[6] * ir + tw[7] * ig + tw[8] * ib;
     }
-    pixel /= normh * normv;
   }
 
   write_ipixel(out, (int2)(x, y), pixel);
