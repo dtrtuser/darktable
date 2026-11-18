@@ -65,10 +65,8 @@ filminversion(read_only image2d_t in, write_only image2d_t out,
               const int width, const int height, const int mode,
               const float4 frame_floor, const float4 frame_ceil,
               const float4 frame_slope, const float4 frame_pivot,
-              const float4 frame_curv, const float4 frame_filtration,
-              const float4 mask_offset, const float4 frame_bw, const float4 curve,
+              const float4 frame_curv, const float4 frame_bw, const float4 curve,
               const float bpc_black, const float out_scale,
-              const float4 dye_k, const int dye_separation,
               const float4 out_r, const float4 out_g, const float4 out_b)
 {
   const int x = get_global_id(0);
@@ -81,7 +79,7 @@ filminversion(read_only image2d_t in, write_only image2d_t out,
 
   if(mode == FI_MODE_BW)
   {
-    // B&W: one luminance density, no mask neutralization or filtration
+    // B&W: one luminance density, no mask neutralization
     const float luma = fmax(0.2126f * pix.x + 0.7152f * pix.y + 0.0722f * pix.z, FI_DENSITY_EPS);
     const float density = -log10(luma);
     const float range = fmax(frame_bw.y - frame_bw.x, 1e-3f);
@@ -100,23 +98,14 @@ filminversion(read_only image2d_t in, write_only image2d_t out,
                                      log10(fmax(pix.z, FI_DENSITY_EPS)),
                                      0.0f);
 
-    // the measured per-channel normalization IS the mask neutralization;
-    // mask_offset/filtration are manual trims on top
+    // the measured per-channel normalization IS the mask neutralization
     const float4 range = fmax(frame_ceil - frame_floor, (float4)1e-3f);
-    const float4 normalized = (density - frame_floor) / range - mask_offset + frame_filtration;
+    const float4 normalized = (density - frame_floor) / range;
 
     // negative: invert the log-exposure axis. frame_pivot already bakes in
     // v_star; frame_curv is 0 unless Cast Removal found a highlight reference.
     const float4 v = frame_slope * -(normalized - frame_pivot) + frame_curv * normalized * normalized;
-    float4 d_print = fi_hd_curve(v, curve);
-
-    // dye separation: k*I + (1-k)*J around the pixel's mean density, see
-    // _apply_dye_separation()
-    if(dye_separation)
-    {
-      const float mean = (d_print.x + d_print.y + d_print.z) / 3.0f;
-      d_print.xyz = mean + dye_k.xyz * (d_print.xyz - mean);
-    }
+    const float4 d_print = fi_hd_curve(v, curve);
 
     res = out_scale * (fi_density_to_linear(d_print) - bpc_black) / (1.0f - bpc_black);
     res.w = pix.w;
