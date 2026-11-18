@@ -45,10 +45,9 @@
  * scene-referred positive via a density-space H&D characteristic curve.
  *
  * The module deliberately does only what darktable has no other module for:
- * mask neutralization, plus the creative filtration and dye separation trims
- * that act in the film's own density domain. Exposure, contrast, tone and
- * color grading are left to the rest of the pipeline, so the print curve
- * runs at fixed, neutral settings.
+ * mask neutralization. Exposure, contrast, tone and color grading are left
+ * to the rest of the pipeline, so the print curve runs at fixed, neutral
+ * settings.
  *
  * Sits after demosaic/white-balance, before exposure/filmic.
  *   INPUT:  linear scene-referred RGB, not inverted, not clipped to [0,1].
@@ -177,10 +176,6 @@
 #define HD_ANCHOR_METER_STRENGTH 0.2f
 #define HD_ANCHOR_METER_BAND 0.12f
 
-// Filtration is scaled by this and divided by the measured per-channel
-// range, so a slider unit stays consistent across scans.
-#define HD_CMY_MAX_DENSITY 0.2f
-
 // toe/shoulder are scaled by this before use (the d_max_eff/d_min_eff lift)
 #define HD_TOE_SHOULDER_STRENGTH 0.85f
 
@@ -211,7 +206,7 @@
 #define HD_CAST_MAX_OFFSET 0.1f         // 1-point fallback tilt clamp
 
 
-DT_MODULE_INTROSPECTION(9, dt_iop_filminversion_params_t)
+DT_MODULE_INTROSPECTION(10, dt_iop_filminversion_params_t)
 
 
 typedef enum dt_iop_filminversion_mode_t
@@ -224,19 +219,6 @@ typedef enum dt_iop_filminversion_mode_t
 typedef struct dt_iop_filminversion_params_t
 {
   dt_iop_filminversion_mode_t mode; /* $DEFAULT: DT_FILMINVERSION_C41 $DESCRIPTION: "film type" */
-
-  /* per-channel density offset subtracted after the measured normalization,
-     for what the measurement leaves behind */
-  float mask_offset[4];  /* $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "mask trim" */
-
-  /* creative filtration: per-channel additive density trim applied after
-     mask neutralization (mimics enlarger dichroic-head CMY filtration,
-     which is itself an additive density-unit shift). */
-  float filtration[4];   /* $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "filtration" */
-
-  /* density-domain saturation on the print curve output, per channel: the
-     separation gain is 1 + trim, so 0 is identity */
-  float dye_separation_trim[4]; /* $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "dye separation trim" */
 
   /* the stored mask-neutralization measurement, no widgets: written by the
      first preview run and by the picker, see _store_measurement(). FALSE
@@ -282,9 +264,6 @@ typedef struct dt_iop_filminversion_measurement_t
 typedef struct dt_iop_filminversion_data_t
 {
   dt_iop_filminversion_mode_t mode;
-  dt_aligned_pixel_t mask_offset;
-  dt_aligned_pixel_t filtration;
-  dt_aligned_pixel_t dye_k;    // per-channel separation gain, 1 + trim
   gboolean measured;
   dt_iop_filminversion_measurement_t m;
 } dt_iop_filminversion_data_t;
@@ -300,7 +279,6 @@ typedef struct dt_iop_filminversion_frame_t
   dt_aligned_pixel_t slope;          // per-channel clamped slope (C41)
   dt_aligned_pixel_t pivot;          // per-channel pivot (NegPy compute_pivot)
   dt_aligned_pixel_t curv;           // per-channel Cast Removal curvature (0 unless active)
-  dt_aligned_pixel_t filtration_eff; // per-channel HD_CMY_MAX_DENSITY-scaled filtration
   float floor_bw, ceil_bw;           // luma-combined equivalents for B&W mode
   float slope_bw, pivot_bw;
 
@@ -319,9 +297,6 @@ typedef struct dt_iop_filminversion_gui_data_t
 {
   GtkWidget *mode;
   GtkWidget *picker;
-  GtkWidget *mask_offset_R, *mask_offset_G, *mask_offset_B;
-  GtkWidget *filtration_R, *filtration_G, *filtration_B;
-  GtkWidget *dye_separation_trim_R, *dye_separation_trim_G, *dye_separation_trim_B;
 
   // Measurements handed from the preview pipe to the GUI thread, which is
   // the only one allowed to write params. Guarded by the module's gui lock.
@@ -391,81 +366,14 @@ int legacy_params(dt_iop_module_t *self,
                   int32_t *new_params_size,
                   int *new_version)
 {
-  // versions 5 to 8 carried the whole tone/color control set this module
-  // no longer has. Only the controls that survived are carried over; the
-  // rest fall back to the fixed print settings, and the measurement is
-  // redone, since those versions never stored one.
-  //
-  // pre-5 was an unrelated power-curve prototype with no mapping at all.
-  if(old_version > 8) return 1;
-
+  // no older layout is carried over: an old edit keeps the module on with
+  // default params, which re-measures the frame
   dt_iop_filminversion_params_t *n = calloc(1, sizeof(dt_iop_filminversion_params_t));
   if(!n) return 1;
   memcpy(n, self->default_params, sizeof(dt_iop_filminversion_params_t));
-
-  if(old_version >= 5)
-  {
-    // mode, mask_offset and filtration lead every one of these layouts
-    typedef struct dt_iop_filminversion_params_v5_head_t
-    {
-      int mode;
-      float mask_offset[4];
-      float filtration[4];
-    } dt_iop_filminversion_params_v5_head_t;
-
-    const dt_iop_filminversion_params_v5_head_t *o = old_params;
-    // E-6 (2) was dropped: its edits come back as a color negative
-    n->mode = o->mode == DT_FILMINVERSION_BW ? DT_FILMINVERSION_BW : DT_FILMINVERSION_C41;
-    for(int c = 0; c < 4; c++)
-    {
-      n->mask_offset[c] = o->mask_offset[c];
-      n->filtration[c] = o->filtration[c];
-    }
-  }
-
-  if(old_version == 8)
-  {
-    typedef struct dt_iop_filminversion_params_v8_t
-    {
-      int mode;
-      float mask_offset[4];
-      float filtration[4];
-      float k_trim[4];
-      float cast_removal_strength;
-      float density;
-      float shadow_density;
-      float highlight_density;
-      float grade;
-      float shadow_grade;
-      float highlight_grade;
-      float snap;
-      float toe;
-      float shoulder;
-      float toe_width;
-      float shoulder_width;
-      float exposure;
-      float dye_separation;
-      float separation_damping;
-      float shadow_filtration[4];
-      float highlight_filtration[4];
-      float toe_trim[4];
-      float shoulder_trim[4];
-      float toe_width_trim[4];
-      float shoulder_width_trim[4];
-      float snap_trim[4];
-      float dye_separation_trim[4];
-    } dt_iop_filminversion_params_v8_t;
-
-    const dt_iop_filminversion_params_v8_t *o = old_params;
-    // the old gain was 1 + dye_separation + trim; folding the global slider
-    // into each trim keeps the per-channel gain
-    for(int c = 0; c < 4; c++)
-      n->dye_separation_trim[c] = fmaxf(-1.0f, fminf(1.0f, o->dye_separation + o->dye_separation_trim[c]));
-  }
-
   *new_params = n;
   *new_params_size = sizeof(dt_iop_filminversion_params_t);
-  *new_version = 9;
+  *new_version = 10;
   return 0;
 }
 
@@ -514,16 +422,6 @@ static inline float _solve_v_star(float a_sh, float a_hl, float d_min_eff, float
   return d_min_eff + _inv_softplus(a_hl * (v1 - d_min_eff)) / a_hl;
 }
 
-// Density-domain saturation on the print curve's output, in place: k*I +
-// (1-k)*J per channel around the pixel's mean density, so neutrals are
-// preserved. k=1 is identity. The curve shape is shared by all channels, so
-// the paper-white base NegPy subtracts first cancels out of this form.
-static inline void _apply_dye_separation(float *const restrict D, const dt_aligned_pixel_t k)
-{
-  const float mean = (D[0] + D[1] + D[2]) / 3.0f;
-  for(int c = 0; c < 3; c++) D[c] = mean + k[c] * (D[c] - mean);
-}
-
 static void _measurement_from_params(const dt_iop_filminversion_params_t *const p,
                                      dt_iop_filminversion_measurement_t *const m)
 {
@@ -570,11 +468,6 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   dt_iop_filminversion_data_t *const d = piece->data;
 
   d->mode = p->mode;
-  for(size_t c = 0; c < 4; c++) d->mask_offset[c] = p->mask_offset[c];
-  for(size_t c = 0; c < 4; c++) d->filtration[c] = p->filtration[c];
-  // NegPy per_channel_dye_separation's own [0,3] range
-  for(size_t c = 0; c < 4; c++)
-    d->dye_k[c] = fmaxf(0.0f, fminf(3.0f, 1.0f + p->dye_separation_trim[c]));
 
   d->measured = p->measured;
   if(p->measured) _measurement_from_params(p, &d->m);
@@ -1492,18 +1385,17 @@ static void _solve_cast_removal_fallback(const dt_aligned_pixel_t shadow_tie_ref
   }
 }
 
-// linear -> log10 density -> per-channel normalization -> mask/filtration
-// trims -> pivot/slope bridge -> H&D curve -> dye separation -> linear ->
-// mid-gray anchor. The result is in print primaries, see _output_matrix().
+// linear -> log10 density -> per-channel normalization -> pivot/slope
+// bridge -> H&D curve -> linear -> mid-gray anchor. The result is in print
+// primaries, see _output_matrix().
 static inline void _process_print(const dt_aligned_pixel_t pix_in,
                                   dt_aligned_pixel_t print,
                                   const dt_iop_filminversion_data_t *const d,
-                                  const dt_iop_filminversion_frame_t *const frame,
-                                  const gboolean dye_separation)
+                                  const dt_iop_filminversion_frame_t *const frame)
 {
   if(d->mode == DT_FILMINVERSION_BW)
   {
-    // B&W: one luminance density, no mask neutralization or filtration.
+    // B&W: one luminance density, no mask neutralization.
     const float luma = fmaxf(0.2126f * pix_in[0] + 0.7152f * pix_in[1] + 0.0722f * pix_in[2], DENSITY_EPS);
     const float density = -log10f(luma);
     const float range = fmaxf(frame->ceil_bw - frame->floor_bw, 1e-3f);
@@ -1517,25 +1409,19 @@ static inline void _process_print(const dt_aligned_pixel_t pix_in,
   }
   else
   {
-    // the measured per-channel normalization IS the mask neutralization;
-    // mask_offset/filtration are manual trims on top
-    dt_aligned_pixel_t D_print;
+    // the measured per-channel normalization IS the mask neutralization
     for_each_channel(c)
     {
       const float density = -log10f(fmaxf(pix_in[c], DENSITY_EPS));
       const float range = fmaxf(frame->ceil[c] - frame->floor[c], 1e-3f);
-      const float normalized = (density - frame->floor[c]) / range - d->mask_offset[c] + frame->filtration_eff[c];
+      const float normalized = (density - frame->floor[c]) / range;
       // negative: invert the log-exposure axis. frame->pivot[c] already
       // bakes in v_star; frame->curv[c] is 0 unless Cast Removal found a
       // highlight reference.
       const float v = frame->slope[c] * -(normalized - frame->pivot[c]) + frame->curv[c] * normalized * normalized;
-      D_print[c] = _hd_curve(v, frame->a_sh, frame->a_hl, frame->d_min_eff, frame->d_max_eff);
+      const float D_print = _hd_curve(v, frame->a_sh, frame->a_hl, frame->d_min_eff, frame->d_max_eff);
+      print[c] = frame->anchor_scale * _apply_bpc(_density_to_linear(D_print), frame->bpc_black);
     }
-
-    if(dye_separation) _apply_dye_separation(D_print, d->dye_k);
-
-    for_each_channel(c)
-      print[c] = frame->anchor_scale * _apply_bpc(_density_to_linear(D_print[c]), frame->bpc_black);
   }
 }
 
@@ -1544,11 +1430,10 @@ static inline void _process_pixel(const dt_aligned_pixel_t pix_in,
                                   dt_aligned_pixel_t pix_out,
                                   const dt_iop_filminversion_data_t *const d,
                                   const dt_iop_filminversion_frame_t *const frame,
-                                  const dt_colormatrix_t out_matrix,
-                                  const gboolean dye_separation)
+                                  const dt_colormatrix_t out_matrix)
 {
   dt_aligned_pixel_t print;
-  _process_print(pix_in, print, d, frame, dye_separation);
+  _process_print(pix_in, print, d, frame);
   for(int r = 0; r < 3; r++)
     pix_out[r] = out_matrix[r][0] * print[0] + out_matrix[r][1] * print[1] + out_matrix[r][2] * print[2];
   pix_out[3] = pix_in[3];
@@ -1754,14 +1639,9 @@ static dt_iop_filminversion_frame_t _frame_from_measurement(
   _compute_curve_shape(base_slope, &frame);
 
   for(int c = 0; c < 3; c++)
-  {
     frame.pivot[c] = m->anchor
                    - invert_sign * (frame.v_star / frame.slope[c] + HD_DENSITY * HD_DENSITY_MULTIPLIER);
-    const float range = fmaxf(m->ceil[c] - m->floor[c], 1e-3f);
-    frame.filtration_eff[c] = d->filtration[c] * HD_CMY_MAX_DENSITY / range;
-  }
   frame.pivot[3] = 0.0f;
-  frame.filtration_eff[3] = 0.0f;
 
   frame.floor_bw = 0.2126f * m->floor[0] + 0.7152f * m->floor[1] + 0.0722f * m->floor[2];
   frame.ceil_bw = 0.2126f * m->ceil[0] + 0.7152f * m->ceil[1] + 0.0722f * m->ceil[2];
@@ -1813,11 +1693,6 @@ static void _output_matrix(const dt_dev_pixelpipe_iop_t *const piece, dt_colorma
               + in->matrix_out[r][2] * _print_to_xyz[2][c];
 }
 
-static inline gboolean _wants_dye_separation(const dt_iop_filminversion_data_t *const d)
-{
-  return d->dye_k[0] != 1.0f || d->dye_k[1] != 1.0f || d->dye_k[2] != 1.0f;
-}
-
 void process(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
              const void *const restrict ivoid, void *const restrict ovoid,
              const dt_iop_roi_t *const restrict roi_in, const dt_iop_roi_t *const restrict roi_out)
@@ -1831,7 +1706,6 @@ void process(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
   dt_iop_filminversion_measurement_t m;
   _resolve_measurement(self, piece, in, roi_in, &m);
   const dt_iop_filminversion_frame_t frame = _frame_from_measurement(&m, d);
-  const gboolean dye_separation = _wants_dye_separation(d);
   dt_colormatrix_t out_matrix;
   _output_matrix(piece, out_matrix);
 
@@ -1840,7 +1714,7 @@ void process(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
   {
     const float *const restrict pix_in = in + k;
     float *const restrict pix_out = out + k;
-    _process_pixel(pix_in, pix_out, d, &frame, out_matrix, dye_separation);
+    _process_pixel(pix_in, pix_out, d, &frame, out_matrix);
   }
 }
 
@@ -1881,7 +1755,6 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   const dt_iop_filminversion_frame_t frame = _frame_from_measurement(&m, d);
 
   const int mode = d->mode;
-  const int dye_separation = _wants_dye_separation(d);
   const float frame_bw[4] = { frame.floor_bw, frame.ceil_bw, frame.slope_bw, frame.pivot_bw };
   const float curve[4] = { frame.a_sh, frame.a_hl, frame.d_min_eff, frame.d_max_eff };
   dt_colormatrix_t M;
@@ -1894,10 +1767,8 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(mode),
       CLFLARRAY(4, frame.floor), CLFLARRAY(4, frame.ceil),
       CLFLARRAY(4, frame.slope), CLFLARRAY(4, frame.pivot),
-      CLFLARRAY(4, frame.curv), CLFLARRAY(4, frame.filtration_eff),
-      CLFLARRAY(4, d->mask_offset), CLFLARRAY(4, frame_bw), CLFLARRAY(4, curve),
+      CLFLARRAY(4, frame.curv), CLFLARRAY(4, frame_bw), CLFLARRAY(4, curve),
       CLARG(frame.bpc_black), CLARG(frame.anchor_scale),
-      CLFLARRAY(4, d->dye_k), CLARG(dye_separation),
       CLFLARRAY(4, out_r), CLFLARRAY(4, out_g), CLFLARRAY(4, out_b));
 }
 #endif
@@ -2011,81 +1882,13 @@ void gui_init(dt_iop_module_t *self)
   dt_action_define_iop(self, N_("pickers"), N_("mask neutralize"), g->picker, &dt_action_def_toggle);
   dt_gui_box_add(self->widget, g->picker);
 
-  g->mask_offset_R = dt_bauhaus_slider_from_params(self, "mask_offset[0]");
-  dt_bauhaus_widget_set_label(g->mask_offset_R, NULL, N_("mask trim red"));
-  g->mask_offset_G = dt_bauhaus_slider_from_params(self, "mask_offset[1]");
-  dt_bauhaus_widget_set_label(g->mask_offset_G, NULL, N_("mask trim green"));
-  g->mask_offset_B = dt_bauhaus_slider_from_params(self, "mask_offset[2]");
-  dt_bauhaus_widget_set_label(g->mask_offset_B, NULL, N_("mask trim blue"));
-  gtk_widget_set_tooltip_text(g->mask_offset_R, _("per-channel trim on top of the measured mask neutralization"));
-  gtk_widget_set_tooltip_text(g->mask_offset_G, _("per-channel trim on top of the measured mask neutralization"));
-  gtk_widget_set_tooltip_text(g->mask_offset_B, _("per-channel trim on top of the measured mask neutralization"));
-
-  dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "creative filtration")));
-
-  g->filtration_R = dt_bauhaus_slider_from_params(self, "filtration[0]");
-  dt_bauhaus_widget_set_label(g->filtration_R, NULL, N_("filtration red"));
-  g->filtration_G = dt_bauhaus_slider_from_params(self, "filtration[1]");
-  dt_bauhaus_widget_set_label(g->filtration_G, NULL, N_("filtration green"));
-  g->filtration_B = dt_bauhaus_slider_from_params(self, "filtration[2]");
-  dt_bauhaus_widget_set_label(g->filtration_B, NULL, N_("filtration blue"));
-#define FILMINVERSION_FILTRATION_TOOLTIP _("additive density trim, like an enlarger dichroic-head color filter.\n" \
-                                           "scaled by the measured per-channel range, so a slider unit\n" \
-                                           "stays consistent across scans.")
-  gtk_widget_set_tooltip_text(g->filtration_R, FILMINVERSION_FILTRATION_TOOLTIP);
-  gtk_widget_set_tooltip_text(g->filtration_G, FILMINVERSION_FILTRATION_TOOLTIP);
-  gtk_widget_set_tooltip_text(g->filtration_B, FILMINVERSION_FILTRATION_TOOLTIP);
-#undef FILMINVERSION_FILTRATION_TOOLTIP
-
-  dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "dye separation")));
-
-  g->dye_separation_trim_R = dt_bauhaus_slider_from_params(self, "dye_separation_trim[0]");
-  dt_bauhaus_widget_set_label(g->dye_separation_trim_R, NULL, N_("dye separation trim red"));
-  g->dye_separation_trim_G = dt_bauhaus_slider_from_params(self, "dye_separation_trim[1]");
-  dt_bauhaus_widget_set_label(g->dye_separation_trim_G, NULL, N_("dye separation trim green"));
-  g->dye_separation_trim_B = dt_bauhaus_slider_from_params(self, "dye_separation_trim[2]");
-  dt_bauhaus_widget_set_label(g->dye_separation_trim_B, NULL, N_("dye separation trim blue"));
-#define FILMINVERSION_DYE_TOOLTIP _("density-domain saturation of this dye layer after the print curve.\n" \
-                                    "positive separates it further from the other two, negative\n" \
-                                    "pulls it toward them. neutrals are unchanged.")
-  gtk_widget_set_tooltip_text(g->dye_separation_trim_R, FILMINVERSION_DYE_TOOLTIP);
-  gtk_widget_set_tooltip_text(g->dye_separation_trim_G, FILMINVERSION_DYE_TOOLTIP);
-  gtk_widget_set_tooltip_text(g->dye_separation_trim_B, FILMINVERSION_DYE_TOOLTIP);
-#undef FILMINVERSION_DYE_TOOLTIP
-  dt_bauhaus_slider_set_digits(g->dye_separation_trim_R, 2);
-  dt_bauhaus_slider_set_digits(g->dye_separation_trim_G, 2);
-  dt_bauhaus_slider_set_digits(g->dye_separation_trim_B, 2);
-
   DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED, _preview_pipe_finished_callback);
-}
-
-
-void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
-{
-  dt_iop_filminversion_gui_data_t *g = self->gui_data;
-  const dt_iop_filminversion_params_t *const p = self->params;
-
-  if(!w || w == g->mode)
-  {
-    // B&W collapses to one luminance density before any of these apply
-    const gboolean color = p->mode != DT_FILMINVERSION_BW;
-    gtk_widget_set_visible(g->mask_offset_R, color);
-    gtk_widget_set_visible(g->mask_offset_G, color);
-    gtk_widget_set_visible(g->mask_offset_B, color);
-    gtk_widget_set_visible(g->filtration_R, color);
-    gtk_widget_set_visible(g->filtration_G, color);
-    gtk_widget_set_visible(g->filtration_B, color);
-    gtk_widget_set_visible(g->dye_separation_trim_R, color);
-    gtk_widget_set_visible(g->dye_separation_trim_G, color);
-    gtk_widget_set_visible(g->dye_separation_trim_B, color);
-  }
 }
 
 
 void gui_update(dt_iop_module_t *const self)
 {
   dt_iop_color_picker_reset(self, TRUE);
-  gui_changed(self, NULL, NULL);
 }
 
 void gui_reset(dt_iop_module_t *self)
