@@ -206,7 +206,7 @@
 #define HD_CAST_MAX_OFFSET 0.1f         // 1-point fallback tilt clamp
 
 
-DT_MODULE_INTROSPECTION(10, dt_iop_filminversion_params_t)
+DT_MODULE_INTROSPECTION(11, dt_iop_filminversion_params_t)
 
 
 typedef enum dt_iop_filminversion_mode_t
@@ -235,6 +235,11 @@ typedef struct dt_iop_filminversion_params_t
   float axis_mid_ref[4];
   float axis_shadow_ref[4];
   float axis_highlight_ref[4];
+
+  /* the neutral-point picker's correction: per-channel offset added to the
+     normalized density, so the picked patch prints neutral. Cleared by every
+     new measurement, which it is relative to; see _solve_neutral(). */
+  float neutral[4];       /* $DEFAULT: 0.0 */
 } dt_iop_filminversion_params_t;
 
 
@@ -264,6 +269,7 @@ typedef struct dt_iop_filminversion_measurement_t
 typedef struct dt_iop_filminversion_data_t
 {
   dt_iop_filminversion_mode_t mode;
+  dt_aligned_pixel_t neutral;
   gboolean measured;
   dt_iop_filminversion_measurement_t m;
 } dt_iop_filminversion_data_t;
@@ -296,7 +302,9 @@ typedef struct dt_iop_filminversion_frame_t
 typedef struct dt_iop_filminversion_gui_data_t
 {
   GtkWidget *mode;
-  GtkWidget *picker;
+  GtkWidget *picker;          // measure area
+  GtkWidget *neutral_picker;  // neutral point
+  GtkWidget *neutral_row;
 
   // Measurements handed from the preview pipe to the GUI thread, which is
   // the only one allowed to write params. Guarded by the module's gui lock.
@@ -366,14 +374,18 @@ int legacy_params(dt_iop_module_t *self,
                   int32_t *new_params_size,
                   int *new_version)
 {
-  // no older layout is carried over: an old edit keeps the module on with
-  // default params, which re-measures the frame
+  // v10 is this layout without the trailing neutral[4]. Nothing older is
+  // carried over: such an edit keeps the module on with default params,
+  // which re-measures the frame.
   dt_iop_filminversion_params_t *n = calloc(1, sizeof(dt_iop_filminversion_params_t));
   if(!n) return 1;
-  memcpy(n, self->default_params, sizeof(dt_iop_filminversion_params_t));
+  if(old_version == 10)
+    memcpy(n, old_params, offsetof(dt_iop_filminversion_params_t, neutral));
+  else
+    memcpy(n, self->default_params, sizeof(dt_iop_filminversion_params_t));
   *new_params = n;
   *new_params_size = sizeof(dt_iop_filminversion_params_t);
-  *new_version = 10;
+  *new_version = 11;
   return 0;
 }
 
@@ -459,6 +471,7 @@ static void _store_measurement(dt_iop_filminversion_params_t *const p,
   p->axis_has_highlight = m->na.has_highlight;
   p->axis_confidence = m->na.confidence;
   p->measured = TRUE;
+  for(int c = 0; c < 4; c++) p->neutral[c] = 0.0f;
 }
 
 void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
@@ -468,6 +481,7 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   dt_iop_filminversion_data_t *const d = piece->data;
 
   d->mode = p->mode;
+  for(int c = 0; c < 4; c++) d->neutral[c] = p->mode == DT_FILMINVERSION_BW ? 0.0f : p->neutral[c];
 
   d->measured = p->measured;
   if(p->measured) _measurement_from_params(p, &d->m);
@@ -1414,7 +1428,7 @@ static inline void _process_print(const dt_aligned_pixel_t pix_in,
     {
       const float density = -log10f(fmaxf(pix_in[c], DENSITY_EPS));
       const float range = fmaxf(frame->ceil[c] - frame->floor[c], 1e-3f);
-      const float normalized = (density - frame->floor[c]) / range;
+      const float normalized = (density - frame->floor[c]) / range + d->neutral[c];
       // negative: invert the log-exposure axis. frame->pivot[c] already
       // bakes in v_star; frame->curv[c] is 0 unless Cast Removal found a
       // highlight reference.
@@ -1504,8 +1518,10 @@ static gboolean _cropping_filtered_out(const dt_dev_pixelpipe_iop_t *const piece
       || (gui_module->operation_tags() & IOP_TAG_CROPPING);
 }
 
-// TRUE when this pipe run is the one darktable samples our picker from:
-// the conditions of _request_color_pick() in pixelpipe_hb.c.
+// TRUE when this pipe run is the one darktable samples our measure-area
+// picker from: the conditions of _request_color_pick() in pixelpipe_hb.c.
+// The neutral-point picker needs no pixels of its own, only darktable's
+// mean of the box.
 static gboolean _picker_active(const dt_iop_module_t *const self, const dt_dev_pixelpipe_iop_t *const piece)
 {
   const dt_develop_t *const dev = self->dev;
@@ -1516,7 +1532,9 @@ static gboolean _picker_active(const dt_iop_module_t *const self, const dt_dev_p
       && darktable.lib->proxy.colorpicker.primary_sample
       && self == dev->gui_module
       && self->enabled
-      && self->request_color_pick != DT_REQUEST_COLORPICK_OFF;
+      && self->request_color_pick != DT_REQUEST_COLORPICK_OFF
+      && darktable.lib->proxy.colorpicker.picker_proxy->colorpick
+         == ((const dt_iop_filminversion_gui_data_t *)self->gui_data)->picker;
 }
 
 // TRUE when _resolve_measurement() needs host pixels for this pipe run.
@@ -1768,7 +1786,7 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       CLFLARRAY(4, frame.floor), CLFLARRAY(4, frame.ceil),
       CLFLARRAY(4, frame.slope), CLFLARRAY(4, frame.pivot),
       CLFLARRAY(4, frame.curv), CLFLARRAY(4, frame_bw), CLFLARRAY(4, curve),
-      CLARG(frame.bpc_black), CLARG(frame.anchor_scale),
+      CLARG(frame.bpc_black), CLARG(frame.anchor_scale), CLFLARRAY(4, d->neutral),
       CLFLARRAY(4, out_r), CLFLARRAY(4, out_g), CLFLARRAY(4, out_b));
 }
 #endif
@@ -1817,15 +1835,83 @@ void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelp
 
 /* Global GUI stuff */
 
-// Stores the measurement of the area the picker is drawn on. darktable
-// calls this after each preview run that moved the picker, which is also
-// the run _resolve_measurement() measured the area on.
+// One channel's print value for a normalized-density offset `o`, i.e. the
+// color path of _process_print() for that channel alone.
+static float _print_channel(const float density, const int c, const float o,
+                            const dt_iop_filminversion_frame_t *const frame)
+{
+  const float range = fmaxf(frame->ceil[c] - frame->floor[c], 1e-3f);
+  const float normalized = (density - frame->floor[c]) / range + o;
+  const float v = frame->slope[c] * -(normalized - frame->pivot[c]) + frame->curv[c] * normalized * normalized;
+  const float D_print = _hd_curve(v, frame->a_sh, frame->a_hl, frame->d_min_eff, frame->d_max_eff);
+  return frame->anchor_scale * _apply_bpc(_density_to_linear(D_print), frame->bpc_black);
+}
+
+// Per-channel offsets making `patch` (the module input, linear) print
+// neutral at its current luminance. Each channel is solved through the real
+// print curve, cast removal included, so the patch is gray after the knees
+// too, not merely at equal normalized density. The luminance is Adobe RGB's,
+// the space the print is handed on in (see _output_matrix()); NegPy anchors
+// on red instead, which also moves brightness. FALSE when there is nothing
+// to solve against yet.
+static gboolean _solve_neutral(const dt_iop_filminversion_params_t *const p, const dt_aligned_pixel_t patch,
+                               float neutral[4])
+{
+  if(!p->measured || p->mode == DT_FILMINVERSION_BW) return FALSE;
+  if(!(patch[0] > 0.0f && patch[1] > 0.0f && patch[2] > 0.0f)) return FALSE;
+
+  dt_iop_filminversion_data_t d = { .mode = p->mode, .measured = TRUE };
+  _measurement_from_params(p, &d.m);
+  const dt_iop_filminversion_frame_t frame = _frame_from_measurement(&d.m, &d);
+
+  float density[3], current[3];
+  for(int c = 0; c < 3; c++)
+  {
+    density[c] = -log10f(fmaxf(patch[c], DENSITY_EPS));
+    current[c] = _print_channel(density[c], c, p->neutral[c], &frame);
+  }
+  const float target = HD_BOUNDS_LUMA_R * current[0] + HD_BOUNDS_LUMA_G * current[1] + HD_BOUNDS_LUMA_B * current[2];
+
+  // the print rises monotonically with the offset (cast removal's curvature
+  // is clamped to keep each channel monotonic), so bisect
+  for(int c = 0; c < 3; c++)
+  {
+    float lo = -1.0f, hi = 1.0f;
+    for(int i = 0; i < 40; i++)
+    {
+      const float mid = 0.5f * (lo + hi);
+      if(_print_channel(density[c], c, mid, &frame) < target) lo = mid;
+      else hi = mid;
+    }
+    neutral[c] = 0.5f * (lo + hi);
+  }
+  neutral[3] = 0.0f;
+  return TRUE;
+}
+
+// Measure area: stores the measurement of the drawn area. darktable calls
+// this after each preview run that moved the picker, which is also the run
+// _resolve_measurement() measured the area on.
+// Neutral point: solves the correction for darktable's mean of the box.
 void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
                         dt_dev_pixelpipe_t *pipe)
 {
   if(darktable.gui->reset) return;
   dt_iop_filminversion_gui_data_t *g = self->gui_data;
   dt_iop_filminversion_params_t *p = self->params;
+
+  if(picker == g->neutral_picker)
+  {
+    float neutral[4];
+    if(!_solve_neutral(p, self->picked_color, neutral))
+    {
+      if(!p->measured) dt_control_log(_("film inversion: the frame is not measured yet"));
+      return;
+    }
+    for(int c = 0; c < 4; c++) p->neutral[c] = neutral[c];
+    dt_dev_add_history_item(darktable.develop, self, TRUE);
+    return;
+  }
 
   dt_iop_filminversion_measurement_t m;
   dt_iop_gui_enter_critical_section(self);
@@ -1873,22 +1959,46 @@ void gui_init(dt_iop_module_t *self)
 
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "mask neutralization")));
 
+  GtkWidget *area_label = dt_ui_label_new(_("measure area"));
+  gtk_widget_set_hexpand(area_label, TRUE);
   g->picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA, NULL);
   gtk_widget_set_tooltip_text(g->picker, _("measure the film's per-channel density range in the drawn\n"
                                            "area and keep it. the whole frame is measured once when\n"
                                            "the module is first applied; after that nothing is\n"
                                            "re-measured unless you use this picker. draw it over the\n"
-                                           "picture only, leaving out the rebate and film holder."));
+                                           "picture only, leaving out the rebate and film holder.\n"
+                                           "a new measurement clears the neutral point."));
   dt_action_define_iop(self, N_("pickers"), N_("mask neutralize"), g->picker, &dt_action_def_toggle);
-  dt_gui_box_add(self->widget, g->picker);
+  dt_gui_box_add(self->widget, dt_gui_hbox(area_label, g->picker));
+
+  GtkWidget *neutral_label = dt_ui_label_new(_("neutral point"));
+  gtk_widget_set_hexpand(neutral_label, TRUE);
+  g->neutral_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA, NULL);
+  gtk_widget_set_tooltip_text(g->neutral_picker, _("draw over an area that should be neutral gray or white.\n"
+                                                   "its color is corrected to neutral; its brightness and\n"
+                                                   "the stored measurement are left as they are."));
+  dt_action_define_iop(self, N_("pickers"), N_("neutral point"), g->neutral_picker, &dt_action_def_toggle);
+  g->neutral_row = dt_gui_hbox(neutral_label, g->neutral_picker);
+  dt_gui_box_add(self->widget, g->neutral_row);
 
   DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED, _preview_pipe_finished_callback);
 }
 
 
+void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
+{
+  dt_iop_filminversion_gui_data_t *g = self->gui_data;
+  const dt_iop_filminversion_params_t *const p = self->params;
+
+  // B&W has a single density, nothing to balance
+  if(!w || w == g->mode)
+    gtk_widget_set_visible(g->neutral_row, p->mode != DT_FILMINVERSION_BW);
+}
+
 void gui_update(dt_iop_module_t *const self)
 {
   dt_iop_color_picker_reset(self, TRUE);
+  gui_changed(self, NULL, NULL);
 }
 
 void gui_reset(dt_iop_module_t *self)
