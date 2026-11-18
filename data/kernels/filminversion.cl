@@ -57,7 +57,9 @@ static inline float4 fi_hd_curve(const float4 v, const float4 curve)
 
 /* frame_bw packs the luma-combined B&W equivalents as
      (floor_bw, ceil_bw, slope_bw, pivot_bw)
-   out_scale is the mid-gray anchor_scale */
+   out_scale is the mid-gray anchor_scale
+   out_r/out_g/out_b are the rows of the print-to-input-profile matrix,
+     see _output_matrix() */
 kernel void
 filminversion(read_only image2d_t in, write_only image2d_t out,
               const int width, const int height, const int mode,
@@ -66,7 +68,8 @@ filminversion(read_only image2d_t in, write_only image2d_t out,
               const float4 frame_curv, const float4 frame_filtration,
               const float4 mask_offset, const float4 frame_bw, const float4 curve,
               const float bpc_black, const float out_scale,
-              const float4 dye_k, const int dye_separation)
+              const float4 dye_k, const int dye_separation,
+              const float4 out_r, const float4 out_g, const float4 out_b)
 {
   const int x = get_global_id(0);
   const int y = get_global_id(1);
@@ -118,6 +121,11 @@ filminversion(read_only image2d_t in, write_only image2d_t out,
     res = out_scale * (fi_density_to_linear(d_print) - bpc_black) / (1.0f - bpc_black);
     res.w = pix.w;
   }
+
+  const float4 p = res;
+  res.x = dot(out_r.xyz, p.xyz);
+  res.y = dot(out_g.xyz, p.xyz);
+  res.z = dot(out_b.xyz, p.xyz);
 
   write_imagef(out, (int2)(x, y), res);
 }

@@ -19,6 +19,7 @@
 #include "bauhaus/bauhaus.h"
 #include "common/color_picker.h"
 #include "common/darktable.h"
+#include "common/iop_profile.h"
 #include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
@@ -1493,9 +1494,9 @@ static void _solve_cast_removal_fallback(const dt_aligned_pixel_t shadow_tie_ref
 
 // linear -> log10 density -> per-channel normalization -> mask/filtration
 // trims -> pivot/slope bridge -> H&D curve -> dye separation -> linear ->
-// mid-gray anchor.
-static inline void _process_pixel(const dt_aligned_pixel_t pix_in,
-                                  dt_aligned_pixel_t pix_out,
+// mid-gray anchor. The result is in print primaries, see _output_matrix().
+static inline void _process_print(const dt_aligned_pixel_t pix_in,
+                                  dt_aligned_pixel_t print,
                                   const dt_iop_filminversion_data_t *const d,
                                   const dt_iop_filminversion_frame_t *const frame,
                                   const gboolean dye_separation)
@@ -1512,7 +1513,7 @@ static inline void _process_pixel(const dt_aligned_pixel_t pix_in,
     const float v = frame->slope_bw * -(normalized - frame->pivot_bw);
     const float D_print = _hd_curve(v, frame->a_sh, frame->a_hl, frame->d_min_eff, frame->d_max_eff);
     const float out = frame->anchor_scale * _apply_bpc(_density_to_linear(D_print), frame->bpc_black);
-    for_each_channel(c) pix_out[c] = out;
+    for_each_channel(c) print[c] = out;
   }
   else
   {
@@ -1534,9 +1535,22 @@ static inline void _process_pixel(const dt_aligned_pixel_t pix_in,
     if(dye_separation) _apply_dye_separation(D_print, d->dye_k);
 
     for_each_channel(c)
-      pix_out[c] = frame->anchor_scale * _apply_bpc(_density_to_linear(D_print[c]), frame->bpc_black);
+      print[c] = frame->anchor_scale * _apply_bpc(_density_to_linear(D_print[c]), frame->bpc_black);
   }
+}
 
+
+static inline void _process_pixel(const dt_aligned_pixel_t pix_in,
+                                  dt_aligned_pixel_t pix_out,
+                                  const dt_iop_filminversion_data_t *const d,
+                                  const dt_iop_filminversion_frame_t *const frame,
+                                  const dt_colormatrix_t out_matrix,
+                                  const gboolean dye_separation)
+{
+  dt_aligned_pixel_t print;
+  _process_print(pix_in, print, d, frame, dye_separation);
+  for(int r = 0; r < 3; r++)
+    pix_out[r] = out_matrix[r][0] * print[0] + out_matrix[r][1] * print[1] + out_matrix[r][2] * print[2];
   pix_out[3] = pix_in[3];
 }
 
@@ -1767,6 +1781,38 @@ static dt_iop_filminversion_frame_t _frame_from_measurement(
   return frame;
 }
 
+// Adobe RGB (1998) -> XYZ, Bradford-adapted to the D50 PCS darktable's
+// profiles use (Lindbloom's table)
+static const float _print_to_xyz[3][3] = {
+  { 0.6097559f, 0.2052401f, 0.1492240f },
+  { 0.3111242f, 0.6256560f, 0.0632197f },
+  { 0.0194811f, 0.0608902f, 0.7448387f },
+};
+
+// The print takes its color from dye densities, not from light the sensor
+// saw, and NegPy reads its primaries as its working space, Adobe RGB: no
+// camera matrix ever applies to it. Here colorin comes after this module
+// and applies its input profile to whatever it is handed, which on the
+// camera matrix oversaturates and skews strong colors such as blue sky.
+// Pre-multiplying by the inverse of that profile makes colorin read the
+// print as Adobe RGB, whichever matrix profile it uses. Identity when
+// colorin has no plain matrix (a LUT or a nonlinear curve), leaving the
+// print in camera primaries.
+static void _output_matrix(const dt_dev_pixelpipe_iop_t *const piece, dt_colormatrix_t M)
+{
+  for(int r = 0; r < 4; r++)
+    for(int c = 0; c < 4; c++) M[r][c] = r == c ? 1.0f : 0.0f;
+
+  const dt_iop_order_iccprofile_info_t *const in = dt_ioppr_get_pipe_input_profile_info(piece->pipe);
+  if(!in || in->nonlinearlut || !dt_is_valid_colormatrix(in->matrix_out[0][0])) return;
+
+  for(int r = 0; r < 3; r++)
+    for(int c = 0; c < 3; c++)
+      M[r][c] = in->matrix_out[r][0] * _print_to_xyz[0][c]
+              + in->matrix_out[r][1] * _print_to_xyz[1][c]
+              + in->matrix_out[r][2] * _print_to_xyz[2][c];
+}
+
 static inline gboolean _wants_dye_separation(const dt_iop_filminversion_data_t *const d)
 {
   return d->dye_k[0] != 1.0f || d->dye_k[1] != 1.0f || d->dye_k[2] != 1.0f;
@@ -1786,13 +1832,15 @@ void process(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
   _resolve_measurement(self, piece, in, roi_in, &m);
   const dt_iop_filminversion_frame_t frame = _frame_from_measurement(&m, d);
   const gboolean dye_separation = _wants_dye_separation(d);
+  dt_colormatrix_t out_matrix;
+  _output_matrix(piece, out_matrix);
 
   DT_OMP_FOR()
   for(size_t k = 0; k < (size_t)roi_out->height * roi_out->width * 4; k += 4)
   {
     const float *const restrict pix_in = in + k;
     float *const restrict pix_out = out + k;
-    _process_pixel(pix_in, pix_out, d, &frame, dye_separation);
+    _process_pixel(pix_in, pix_out, d, &frame, out_matrix, dye_separation);
   }
 }
 
@@ -1836,6 +1884,11 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   const int dye_separation = _wants_dye_separation(d);
   const float frame_bw[4] = { frame.floor_bw, frame.ceil_bw, frame.slope_bw, frame.pivot_bw };
   const float curve[4] = { frame.a_sh, frame.a_hl, frame.d_min_eff, frame.d_max_eff };
+  dt_colormatrix_t M;
+  _output_matrix(piece, M);
+  const float out_r[4] = { M[0][0], M[0][1], M[0][2], 0.0f };
+  const float out_g[4] = { M[1][0], M[1][1], M[1][2], 0.0f };
+  const float out_b[4] = { M[2][0], M[2][1], M[2][2], 0.0f };
 
   return dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_filminversion, width, height,
       CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(mode),
@@ -1844,7 +1897,8 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       CLFLARRAY(4, frame.curv), CLFLARRAY(4, frame.filtration_eff),
       CLFLARRAY(4, d->mask_offset), CLFLARRAY(4, frame_bw), CLFLARRAY(4, curve),
       CLARG(frame.bpc_black), CLARG(frame.anchor_scale),
-      CLFLARRAY(4, d->dye_k), CLARG(dye_separation));
+      CLFLARRAY(4, d->dye_k), CLARG(dye_separation),
+      CLFLARRAY(4, out_r), CLFLARRAY(4, out_g), CLFLARRAY(4, out_b));
 }
 #endif
 
