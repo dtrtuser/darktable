@@ -58,6 +58,7 @@ static inline float4 fi_hd_curve(const float4 v, const float4 curve)
 /* frame_bw packs the luma-combined B&W equivalents as
      (floor_bw, ceil_bw, slope_bw, pivot_bw)
    out_scale is the mid-gray anchor_scale
+   neutral is the neutral-point correction, zero for B&W
    out_r/out_g/out_b are the rows of the print-to-input-profile matrix,
      see _output_matrix() */
 kernel void
@@ -66,7 +67,7 @@ filminversion(read_only image2d_t in, write_only image2d_t out,
               const float4 frame_floor, const float4 frame_ceil,
               const float4 frame_slope, const float4 frame_pivot,
               const float4 frame_curv, const float4 frame_bw, const float4 curve,
-              const float bpc_black, const float out_scale,
+              const float bpc_black, const float out_scale, const float4 neutral,
               const float4 out_r, const float4 out_g, const float4 out_b)
 {
   const int x = get_global_id(0);
@@ -100,7 +101,7 @@ filminversion(read_only image2d_t in, write_only image2d_t out,
 
     // the measured per-channel normalization IS the mask neutralization
     const float4 range = fmax(frame_ceil - frame_floor, (float4)1e-3f);
-    const float4 normalized = (density - frame_floor) / range;
+    const float4 normalized = (density - frame_floor) / range + neutral;
 
     // negative: invert the log-exposure axis. frame_pivot already bakes in
     // v_star; frame_curv is 0 unless Cast Removal found a highlight reference.
