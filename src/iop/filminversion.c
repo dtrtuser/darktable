@@ -26,6 +26,7 @@
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
 #include "develop/openmp_maths.h"
+#include "develop/pixelpipe_cache.h"
 #include "develop/pixelpipe_hb.h"
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
@@ -485,6 +486,14 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
 
   d->measured = p->measured;
   if(p->measured) _measurement_from_params(p, &d->m);
+
+  // measuring is a side effect of process(), which the pipe skips when it
+  // has cached output for the same params. A reset returns to exactly the
+  // defaults, so after the first one the preview would reuse its earlier
+  // unmeasured output, store nothing, and leave the full pipe rendering
+  // with its own viewport measurement.
+  else
+    dt_dev_pixelpipe_cache_invalidate_later(pipe, self->iop_order, "filminversion measures: ");
 }
 
 // Toe/shoulder curve shape on the neutral paper: both start at zero, and
